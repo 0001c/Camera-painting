@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>隔空写字 - 雪花飘落版</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Microsoft Yahei', sans-serif;
+        }
+
+        body {
+            background: #000;
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #video-container {
+            position: relative;
+            flex: 1;
+        }
+
+        video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* 镜像翻转，更符合直觉 */
+            opacity: 0.3; /* 半透明显示视频 */
+            z-index: 1;
+        }
+
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            cursor: none;
+        }
+
+        #snow-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 3;
+            pointer-events: none;
+        }
+
+        /* 功能面板样式 */
+        #control-panel {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 15px;
+            padding: 20px;
+            display: none;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            z-index: 10;
+            box-shadow: 0 0 20px rgba(0, 0, 255, 0.3);
+        }
+
+        .control-item {
+            width: 60px;
+            height: 60px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 3px solid transparent;
+        }
+
+        .control-item:hover, .control-item.active {
+            transform: scale(1.1);
+            border-color: #0078ff;
+        }
+
+        .pen {
+            background: #f0f0f0;
+            font-size: 24px;
+        }
+
+        .eraser {
+            background: #f0f0f0;
+            font-size: 24px;
+        }
+
+        .color-red {
+            background: red;
+        }
+
+        .color-green {
+            background: green;
+        }
+
+        .color-blue {
+            background: blue;
+        }
+
+        .size-small {
+            background: #ccc;
+            font-size: 12px;
+        }
+
+        .size-medium {
+            background: #ccc;
+            font-size: 18px;
+        }
+
+        .size-large {
+            background: #ccc;
+            font-size: 24px;
+        }
+
+        /* 提示文本 */
+        #hint {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 14px;
+            text-align: center;
+            z-index: 5;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 20px;
+        }
+
+        /* 加载提示 */
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 20px;
+            z-index: 20;
+        }
+    </style>
+</head>
+<body>
+    <div id="video-container">
+        <div id="loading">正在加载手部检测模型，请稍候...</div>
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="canvas"></canvas>
+        <canvas id="snow-canvas"></canvas>
+        
+        <!-- 控制面板 -->
+        <div id="control-panel">
+            <div class="control-item pen active" data-type="tool" data-value="pen">✏️</div>
+            <div class="control-item eraser" data-type="tool" data-value="eraser">🧽</div>
+            <div class="control-item" data-type="clear">🗑️</div>
+            
+            <div class="control-item color-red" data-type="color" data-value="#ff0000"></div>
+            <div class="control-item color-green" data-type="color" data-value="#00ff00"></div>
+            <div class="control-item color-blue" data-type="color" data-value="#0000ff"></div>
+            
+            <div class="control-item size-small" data-type="size" data-value="5">小</div>
+            <div class="control-item size-medium" data-type="size" data-value="10">中</div>
+            <div class="control-item size-large" data-type="size" data-value="15">大</div>
+        </div>
+        
+        <div id="hint">
+            🖐️ 伸出手掌显示控制面板 | 🤏 拇指食指相触开始写字 | 
+            ✌️ 食指中指张开清除文字 | 🖌️ 双指缩放文字
+        </div>
+    </div>
+
+    <!-- MediaPipe 库 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1646425289/camera_utils.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1646424915/drawing_utils.min.js"></script>
+
+    <script>
+        // 全局变量
+        let video, canvas, snowCanvas, ctx, snowCtx;
+        let hands = null;
+        let isModelLoaded = false;
+        let controlPanel, loading;
+        
+        // 绘画状态
+        let drawingState = {
+            tool: 'pen',          // 当前工具：pen/eraser
+            color: '#ff0000',     // 画笔颜色
+            size: 10,             // 画笔大小
+            isDrawing: false,     // 是否正在绘画
+            lastPosition: null,   // 上一帧手指位置
+            points: [],           // 所有绘画点
+            scalePoints: [],      // 缩放控制点
+            snowflakes: [],       // 雪花粒子
+            panelVisible: false,  // 控制面板是否显示
+            selectedItem: null    // 当前选中的面板项
+        };
+
+        // 初始化
+        async function init() {
+            // 获取DOM元素
+            video = document.getElementById('video');
+            canvas = document.getElementById('canvas');
+            snowCanvas = document.getElementById('snow-canvas');
+            controlPanel = document.getElementById('control-panel');
+            loading = document.getElementById('loading');
+            
+            // 设置画布尺寸
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            
+            ctx = canvas.getContext('2d');
+            snowCtx = snowCanvas.getContext('2d');
+
+            // 初始化MediaPipe Hands
+            await initMediaPipeHands();
+            
+            // 启动摄像头
+            await startCamera();
+            
+            // 隐藏加载提示
+            loading.style.display = 'none';
+            
+            // 开始动画循环
+            requestAnimationFrame(animate);
+        }
+
+        // 调整画布尺寸
+        function resizeCanvas() {
+            const container = document.getElementById('video-container');
+            const { width, height } = container.getBoundingClientRect();
+            
+            canvas.width = width;
+            canvas.height = height;
+            snowCanvas.width = width;
+            snowCanvas.height = height;
+        }
+
+        // 初始化MediaPipe Hands
+        async function initMediaPipeHands() {
+            hands = new window.mediapipe.Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
+            });
+
+            // 配置参数
+            hands.setOptions({
+                maxNumHands: 2,          // 最多检测2只手
+                modelComplexity: 1,      // 模型复杂度
+                minDetectionConfidence: 0.7, // 检测置信度
+                minTrackingConfidence: 0.7   // 跟踪置信度
+            });
+
+            // 处理检测结果
+            hands.onResults(handleResults);
+
+            isModelLoaded = true;
+        }
+
+        // 启动摄像头
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'user', // 前置摄像头
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    },
+                    audio: false
+                });
+                
+                video.srcObject = stream;
+                
+                // 等待视频加载
+                await new Promise(resolve => {
+                    video.onloadedmetadata = resolve;
+                });
+                
+            } catch (err) {
+                console.error('摄像头访问失败:', err);
+                alert('无法访问摄像头，请确保已授予权限并启用摄像头');
+            }
+        }
+
+        // 处理手部检测结果
+        function handleResults(results) {
+            if (!results.multiHandLandmarks) {
+                // 没有检测到手，重置状态
+                drawingState.isDrawing = false;
+                drawingState.lastPosition = null;
+                drawingState.scalePoints = [];
+                return;
+            }
+
+            // 获取所有检测到的手
+            const hands = results.multiHandLandmarks;
+            
+            // 清空画布（保留绘制内容）
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.restore();
+            
+            // 镜像翻转画布以匹配视频
+            ctx.scale(-1, 1);
+            ctx.translate(-canvas.width, 0);
+
+            // 处理每只手
+            hands.forEach((hand, handIndex) => {
+                processHand(hand, handIndex, hands.length);
+            });
+
+            // 绘制所有保留的点
+            drawAllPoints();
+            
+            // 恢复画布状态
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+        }
+
+        // 处理单只手的关键点
+        function processHand(hand, handIndex, totalHands) {
+            // 获取关键点坐标
+            const landmarks = hand;
+            
+            // 关键节点索引：https://developers.google.com/mediapipe/solutions/vision/hand_landmarker
+            const thumbTip = landmarks[4];    // 拇指指尖
+            const indexTip = landmarks[8];    // 食指指尖
+            const middleTip = landmarks[12];  // 中指指尖
+            const wrist = landmarks[0];       // 手腕
+
+            // 转换为画布坐标
+            const convert = (point) => ({
+                x: point.x * canvas.width,
+                y: point.y * canvas.height
+            });
+
+            const thumb = convert(thumbTip);
+            const index = convert(indexTip);
+            const middle = convert(middleTip);
+            const wristPos = convert(wrist);
+
+            // 计算两点之间的距离
+            const getDistance = (p1, p2) => {
+                return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+            };
+
+            // 1. 检测手掌张开（显示控制面板）
+            const palmOpen = isPalmOpen(landmarks);
+            if (palmOpen) {
+                if (!drawingState.panelVisible) {
+                    drawingState.panelVisible = true;
+                    controlPanel.style.display = 'grid';
+                    // 重置选中项
+                    drawingState.selectedItem = null;
+                }
+                
+                // 用食指选择面板项
+                selectPanelItem(index);
+            } else if (drawingState.panelVisible) {
+                // 手掌闭合，隐藏面板
+                drawingState.panelVisible = false;
+                controlPanel.style.display = 'none';
+                
+                // 应用选中的设置
+                if (drawingState.selectedItem) {
+                    applyPanelSelection(drawingState.selectedItem);
+                }
+            }
+
+            // 2. 检测拇指和食指相触（开始写字）
+            const thumbIndexDistance = getDistance(thumb, index);
+            const isPinch = thumbIndexDistance < 30; // 距离阈值
+
+            if (isPinch && !drawingState.panelVisible) {
+                if (!drawingState.isDrawing) {
+                    drawingState.isDrawing = true;
+                    drawingState.lastPosition = index;
+                } else {
+                    // 绘制线条
+                    if (drawingState.lastPosition) {
+                        ctx.beginPath();
+                        ctx.moveTo(drawingState.lastPosition.x, drawingState.lastPosition.y);
+                        ctx.lineTo(index.x, index.y);
+                        ctx.lineCap = 'round';
+                        ctx.lineJoin = 'round';
+                        
+                        if (drawingState.tool === 'pen') {
+                            ctx.strokeStyle = drawingState.color;
+                            ctx.lineWidth = drawingState.size;
+                            ctx.stroke();
+                            
+                            // 保存绘制点
+                            drawingState.points.push({
+                                x: index.x,
+                                y: index.y,
+                                color: drawingState.color,
+                                size: drawingState.size,
+                                path: [drawingState.lastPosition, index]
+                            });
+                        } else if (drawingState.tool === 'eraser') {
+                            // 橡皮擦功能
+                            erasePoints(index, drawingState.size * 2);
+                        }
+                    }
+                    drawingState.lastPosition = index;
+                }
+            } else {
+                drawingState.isDrawing = false;
+                drawingState.lastPosition = null;
+            }
+
+            // 3. 检测双指缩放（两只手的食指）
+            if (totalHands === 2 && handIndex === 0) {
+                const otherHand = hands[1];
+                const otherIndex = convert(otherHand[8]);
+                drawingState.scalePoints = [index, otherIndex];
+                
+                // 计算缩放中心和距离
+                const center = {
+                    x: (index.x + otherIndex.x) / 2,
+                    y: (index.y + otherIndex.y) / 2
+                };
+                const distance = getDistance(index, otherIndex);
+                
+                // 应用缩放
+                scaleDrawing(center, distance);
+            }
+
+            // 4. 检测食指和中指张开（清除文字，转为雪花）
+            const indexMiddleDistance = getDistance(index, middle);
+            const isTwoFingersOpen = indexMiddleDistance > 80;
+            
+            if (isTwoFingersOpen && !drawingState.panelVisible && drawingState.points.length > 0) {
+                // 将绘制点转为雪花
+                convertToSnowflakes();
+                drawingState.points = [];
+            }
+
+            // 绘制手部关键点（调试用）
+            drawHandLandmarks(landmarks);
+        }
+
+        // 判断手掌是否张开
+        function isPalmOpen(landmarks) {
+            // 检查主要手指是否张开
+            const fingerTips = [8, 12, 16, 20]; // 食指、中指、无名指、小指指尖
+            const fingerMCP = [5, 9, 13, 17];   // 手指掌指关节
+            
+            let openCount = 0;
+            for (let i = 0; i < fingerTips.length; i++) {
+                const tip = landmarks[fingerTips[i]];
+                const mcp = landmarks[fingerMCP[i]];
+                
+                // 指尖在掌指关节外侧视为张开
+                if (tip.y < mcp.y - 0.02) { // 0.02是相对阈值
+                    openCount++;
+                }
+            }
+            
+            return openCount >= 3; // 至少3根手指张开
+        }
+
+        // 选择面板项
+        function selectPanelItem(index) {
+            const panelRect = controlPanel.getBoundingClientRect();
+            // 转换食指坐标到屏幕坐标系（取消镜像）
+            const screenX = canvas.width - index.x;
+            const screenY = index.y;
+
+            // 检查是否在面板范围内
+            if (
+                screenX >= panelRect.left && screenX <= panelRect.right &&
+                screenY >= panelRect.top && screenY <= panelRect.bottom
+            ) {
+                // 找到被选中的项
+                const items = controlPanel.querySelectorAll('.control-item');
+                items.forEach(item => {
+                    const rect = item.getBoundingClientRect();
+                    if (
+                        screenX >= rect.left && screenX <= rect.right &&
+                        screenY >= rect.top && screenY <= rect.bottom
+                    ) {
+                        // 高亮选中项
+                        items.forEach(i => i.classList.remove('active'));
+                        item.classList.add('active');
+                        drawingState.selectedItem = item;
+                    }
+                });
+            }
+        }
+
+        // 应用面板选择
+        function applyPanelSelection(item) {
+            const type = item.dataset.type;
+            const value = item.dataset.value;
+            
+            switch (type) {
+                case 'tool':
+                    drawingState.tool = value;
+                    break;
+                case 'color':
+                    drawingState.color = value;
+                    break;
+                case 'size':
+                    drawingState.size = parseInt(value);
+                    break;
+                case 'clear':
+                    drawingState.points = [];
+                    drawingState.snowflakes = [];
+                    break;
+            }
+        }
+
+        // 绘制所有保留的点
+        function drawAllPoints() {
+            drawingState.points.forEach(point => {
+                ctx.beginPath();
+                ctx.moveTo(point.path[0].x, point.path[0].y);
+                ctx.lineTo(point.path[1].x, point.path[1].y);
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.strokeStyle = point.color;
+                ctx.lineWidth = point.size;
+                ctx.stroke();
+            });
+        }
+
+        // 橡皮擦功能
+        function erasePoints(position, radius) {
+            const newPoints = [];
+            const { x, y } = position;
+            
+            drawingState.points.forEach(point => {
+                // 检查线段是否与橡皮擦圆相交
+                const p1 = point.path[0];
+                const p2 = point.path[1];
+                
+                const distance = distanceFromPointToLine(x, y, p1.x, p1.y, p2.x, p2.y);
+                if (distance > radius) {
+                    newPoints.push(point);
+                }
+            });
+            
+            drawingState.points = newPoints;
+        }
+
+        // 计算点到线段的距离
+        function distanceFromPointToLine(px, py, x1, y1, x2, y2) {
+            const A = px - x1;
+            const B = py - y1;
+            const C = x2 - x1;
+            const D = y2 - y1;
+
+            const dot = A * C + B * D;
+            const lenSq = C * C + D * D;
+            
+            if (lenSq === 0) return Math.hypot(A, B);
+            
+            let param = dot / lenSq;
+            
+            let xx, yy;
+            if (param < 0) {
+                xx = x1;
+                yy = y1;
+            } else if (param > 1) {
+                xx = x2;
+                yy = y2;
+            } else {
+                xx = x1 + param * C;
+                yy = y1 + param * D;
+            }
+            
+            return Math.hypot(px - xx, py - yy);
+        }
+
+        // 缩放绘制内容
+        let lastScaleDistance = null;
+        function scaleDrawing(center, distance) {
+            if (!lastScaleDistance) {
+                lastScaleDistance = distance;
+                return;
+            }
+            
+            // 计算缩放比例
+            const scaleRatio = distance / lastScaleDistance;
+            lastScaleDistance = distance;
+            
+            // 应用缩放到所有点
+            drawingState.points = drawingState.points.map(point => {
+                return {
+                    ...point,
+                    x: center.x + (point.x - center.x) * scaleRatio,
+                    y: center.y + (point.y - center.y) * scaleRatio,
+                    size: point.size * scaleRatio,
+                    path: point.path.map(p => ({
+                        x: center.x + (p.x - center.x) * scaleRatio,
+                        y: center.y + (p.y - center.y) * scaleRatio
+                    }))
+                };
+            });
+            
+            // 应用缩放到雪花
+            drawingState.snowflakes = drawingState.snowflakes.map(snow => {
+                return {
+                    ...snow,
+                    x: center.x + (snow.x - center.x) * scaleRatio,
+                    y: center.y + (snow.y - center.y) * scaleRatio,
+                    size: snow.size * scaleRatio
+                };
+            });
+        }
+
+        // 转换绘制点为雪花
+        function convertToSnowflakes() {
+            drawingState.points.forEach(point => {
+                // 为每个线段创建多个雪花
+                const p1 = point.path[0];
+                const p2 = point.path[1];
+                const segments = Math.floor(getDistance(p1, p2) / 10);
+                
+                for (let i = 0; i < segments; i++) {
+                    const t = i / segments;
+                    const x = p1.x + (p2.x - p1.x) * t;
+                    const y = p1.y + (p2.y - p1.y) * t;
+                    
+                    drawingState.snowflakes.push({
+                        x: x,
+                        y: y,
+                        size: point.size * (0.5 + Math.random() * 0.5),
+                        color: point.color,
+                        velocity: 1 + Math.random() * 3, // 下落速度
+                        drift: (Math.random() - 0.5) * 2, // 水平漂移
+                        opacity: 1,
+                        decay: 0.005 + Math.random() * 0.005 // 透明度衰减
+                    });
+                }
+            });
+        }
+
+        // 绘制雪花动画
+        function drawSnowflakes() {
+            snowCtx.clearRect(0, 0, snowCanvas.width, snowCanvas.height);
+            
+            // 镜像翻转雪花画布以匹配
+            snowCtx.scale(-1, 1);
+            snowCtx.translate(-snowCanvas.width, 0);
+            
+            const aliveSnowflakes = [];
+            
+            drawingState.snowflakes.forEach(snow => {
+                // 更新位置
+                snow.y += snow.velocity;
+                snow.x += snow.drift;
+                snow.opacity -= snow.decay;
+                
+                // 只保留可见的雪花
+                if (snow.opacity > 0 && snow.y < snowCanvas.height) {
+                    // 绘制雪花
+                    snowCtx.beginPath();
+                    snowCtx.arc(snow.x, snow.y, snow.size / 2, 0, Math.PI * 2);
+                    snowCtx.fillStyle = `${snow.color}${Math.floor(snow.opacity * 255).toString(16).padStart(2, '0')}`;
+                    snowCtx.fill();
+                    
+                    aliveSnowflakes.push(snow);
+                }
+            });
+            
+            drawingState.snowflakes = aliveSnowflakes;
+            
+            // 恢复画布状态
+            snowCtx.setTransform(1, 0, 0, 1, 0, 0);
+        }
+
+        // 绘制手部关键点（调试用）
+        function drawHandLandmarks(landmarks) {
+            ctx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+            ctx.strokeStyle = 'rgba(0, 255, 0, 0.8)';
+            ctx.lineWidth = 2;
+            
+            // 绘制关节点
+            landmarks.forEach(landmark => {
+                const x = landmark.x * canvas.width;
+                const y = landmark.y * canvas.height;
+                
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            
+            // 绘制骨骼连线
+            const connections = [
+                [0, 1], [1, 2], [2, 3], [3, 4], // 拇指
+                [0, 5], [5, 6], [6, 7], [7, 8], // 食指
+                [0, 9], [9, 10], [10, 11], [11, 12], // 中指
+                [0, 13], [13, 14], [14, 15], [15, 16], // 无名指
+                [0, 17], [17, 18], [18, 19], [19, 20]  // 小指
+            ];
+            
+            connections.forEach(([start, end]) => {
+                const s = landmarks[start];
+                const e = landmarks[end];
+                
+                ctx.beginPath();
+                ctx.moveTo(s.x * canvas.width, s.y * canvas.height);
+                ctx.lineTo(e.x * canvas.width, e.y * canvas.height);
+                ctx.stroke();
+            });
+        }
+
+        // 动画循环
+        function animate() {
+            if (isModelLoaded && video.readyState >= 2) {
+                // 持续检测手部
+                hands.send({ image: video });
+                
+                // 绘制雪花
+                drawSnowflakes();
+            }
+            
+            requestAnimationFrame(animate);
+        }
+
+        // 页面加载完成后初始化
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
