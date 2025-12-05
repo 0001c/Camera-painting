@@ -222,16 +222,25 @@
 
 			let foundPalmOpen = false;
 			let primaryPalmPos = null;
-			for(const lm of handsL){ if(isPalmOpen(lm)){ foundPalmOpen = true; const p = pointOnCanvas(lm[0].x,lm[0].y); primaryPalmPos = p; break; } }
+			for(const lm of handsL){
+				if(isPalmOpen(lm)){
+					foundPalmOpen = true;
+					const p = pointOnCanvas(lm[0].x,lm[0].y);
+					primaryPalmPos = p;
+					break;
+				}
+			}
 
-			if(foundPalmOpen){ showPanelAt(primaryPalmPos.x,primaryPalmPos.y); }
+			if(foundPalmOpen && primaryPalmPos){ showPanelAt(primaryPalmPos.x,primaryPalmPos.y); }
 
 			if(panelVisible && handsL.length>0){
 				const lm = handsL[0];
 				const ip = pointOnCanvas(lm[8].x,lm[8].y);
 				handleUIPointer(ip.x,ip.y);
-				if(isPalmOpen(lm) && !foundPalmOpen){ hidePanel(); }
 			}
+
+			// 如果面板可见但当前帧没有检测到任何张开手掌，则隐藏面板
+			if(panelVisible && !foundPalmOpen){ hidePanel(); }
 
 			let anyPinch=false;
 			if(handsL.length>0){
