@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+	<title>隔空写字 - Camera Painting (MediaPipe)</title>
+	<style>
+		html,body{height:100%;margin:0;background:#111;color:#fff;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+		#container{position:relative;height:100%;width:100%;overflow:hidden;touch-action:none}
+		video#input_video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);opacity:0.15}
+		canvas{position:absolute;top:0;left:0;width:100%;height:100%;touch-action:none}
+		#uiPanel{position:absolute;display:none;background:rgba(0,0,0,0.6);backdrop-filter:blur(6px);border-radius:12px;padding:8px;z-index:20}
+		.btn{display:inline-block;padding:8px 10px;margin:6px;border-radius:8px;background:#222;border:1px solid #333;color:#fff;min-width:44px;text-align:center}
+		.swatch{width:28px;height:28px;border-radius:6px;display:inline-block;margin:4px;border:2px solid #000}
+		.selected{outline:2px solid #fff}
+		#hint{position:absolute;left:10px;bottom:14px;background:rgba(0,0,0,0.5);padding:8px;border-radius:8px;font-size:14px}
+		#loading{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#000a;padding:12px;border-radius:8px}
+	</style>
+</head>
+<body>
+	<div id="container">
+		<video id="input_video" autoplay playsinline></video>
+		<canvas id="draw"></canvas>
+		<canvas id="tmp"></canvas>
+		<div id="uiPanel"></div>
+		<div id="hint">手势说明：打开手掌显示面板；食指靠近按钮选择；合拢食指+拇指握笔写字；两只手食指缩放；食指+中指打开消散</div>
+		<div id="loading">正在启动摄像头与手部追踪…</div>
+	</div>
+
+	<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+	<script>
+		const video = document.getElementById('input_video');
+		const drawCanvas = document.getElementById('draw');
+		const tmpCanvas = document.getElementById('tmp');
+		const uiPanel = document.getElementById('uiPanel');
+		const loading = document.getElementById('loading');
+		const hint = document.getElementById('hint');
+
+		let dw = 1280, dh = 720;
+		function resizeCanvases(){
+			const rect = video.getBoundingClientRect();
+			[drawCanvas,tmpCanvas].forEach(c=>{c.width = rect.width; c.height = rect.height; c.style.width = rect.width+'px'; c.style.height = rect.height+'px';});
+		}
+
+		const ctx = drawCanvas.getContext('2d',{alpha:true});
+		const tmp = tmpCanvas.getContext('2d',{alpha:true});
+
+		let strokes = []; // {points: [{x,y}], color, size}
+		let currentStroke = null;
+		let tool = 'pen';
+		let penColor = '#00FFFF';
+		let penSize = 6;
+
+		function drawAll(){
+			ctx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
+			for(const s of strokes){
+				ctx.globalCompositeOperation = 'source-over';
+				ctx.strokeStyle = s.color;
+				ctx.lineWidth = s.size;
+				ctx.lineJoin = ctx.lineCap = 'round';
+				ctx.beginPath();
+				if(s.points.length>0){
+					ctx.moveTo(s.points[0].x,s.points[0].y);
+					for(let i=1;i<s.points.length;i++) ctx.lineTo(s.points[i].x,s.points[i].y);
+				}
+				ctx.stroke();
+			}
+		}
+
+		function pointOnCanvas(normX,normY){
+			const w = drawCanvas.width, h = drawCanvas.height;
+			return {x: w*(1 - normX), y: h*normY};
+		}
+
+		function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+
+		function isFingerUp(landmarks, tipIdx, pipIdx){
+			if(!landmarks) return false;
+			return landmarks[tipIdx].y < landmarks[pipIdx].y - 0.02;
+		}
+
+		function isPalmOpen(landmarks){
+			if(!landmarks) return false;
+			const upIndex = isFingerUp(landmarks,8,6);
+			const upMiddle = isFingerUp(landmarks,12,10);
+			const upRing = isFingerUp(landmarks,16,14);
+			const upPinky = isFingerUp(landmarks,20,18);
+			const thumbAway = (landmarks[4].x - landmarks[2].x) * (landmarks[0].x - landmarks[2].x) < 0 || Math.abs(landmarks[4].x - landmarks[2].x) > 0.04;
+			return upIndex && upMiddle && upRing && upPinky && thumbAway;
+		}
+
+		function isPinch(landmarks){
+			if(!landmarks) return false;
+			const p = landmarks[8], t = landmarks[4];
+			const d = Math.hypot(p.x-t.x,p.y-t.y);
+			return d < 0.05;
+		}
+
+		function indexMiddleOpen(landmarks){
+			if(!landmarks) return false;
+			return isFingerUp(landmarks,8,6) && isFingerUp(landmarks,12,10) && !isFingerUp(landmarks,16,14);
+		}
+
+		const panelButtons = [];
+		function buildUIPanel(){
+			uiPanel.innerHTML = '';
+			const penBtn = document.createElement('div'); penBtn.className='btn'; penBtn.textContent='笔'; penBtn.dataset.action='pen'; uiPanel.appendChild(penBtn); panelButtons.push(penBtn);
+			const erBtn = document.createElement('div'); erBtn.className='btn'; erBtn.textContent='橡皮'; erBtn.dataset.action='eraser'; uiPanel.appendChild(erBtn); panelButtons.push(erBtn);
+			const colors = ['#00FFFF','#FFDD00','#FF3B30','#00C853','#FFFFFF'];
+			const colorWrap = document.createElement('div'); colorWrap.style.marginTop='6px';
+			colors.forEach(c=>{const s=document.createElement('div');s.className='swatch';s.style.background=c;s.dataset.color=c;colorWrap.appendChild(s);panelButtons.push(s);});
+			uiPanel.appendChild(colorWrap);
+			const sizes = [4,8,14];
+			const sizeWrap = document.createElement('div'); sizeWrap.style.marginTop='6px';
+			sizes.forEach(sz=>{const b=document.createElement('div');b.className='btn';b.textContent=sz;b.dataset.size=sz;sizeWrap.appendChild(b);panelButtons.push(b);});
+			uiPanel.appendChild(sizeWrap);
+		}
+		buildUIPanel();
+
+		let hoverCounts = new Map();
+
+		function handleUIPointer(x,y){
+			const rect = uiPanel.getBoundingClientRect();
+			const px = x, py = y;
+			for(const b of panelButtons){
+				const r = b.getBoundingClientRect();
+				const inside = px>=r.left && px<=r.right && py>=r.top && py<=r.bottom;
+				const key = b.dataset.action || b.dataset.color || b.dataset.size || b.textContent;
+				if(inside){
+					hoverCounts.set(key,(hoverCounts.get(key)||0)+1);
+					b.classList.add('selected');
+					if(hoverCounts.get(key)>10){
+						applySelection(b);
+						hoverCounts.set(key,0);
+					}
+				} else { hoverCounts.set(key,0); b.classList.remove('selected'); }
+			}
+		}
+
+		function applySelection(el){
+			if(el.dataset.action==='pen'){ tool='pen'; }
+			if(el.dataset.action==='eraser'){ tool='eraser'; }
+			if(el.dataset.color){ penColor = el.dataset.color; tool='pen'; }
+			if(el.dataset.size){ penSize = Number(el.dataset.size); }
+			el.animate([{transform:'scale(1.1)'},{transform:'scale(1)'}],{duration:200});
+		}
+
+		let scaling = false; let scaleBaseDist = null; let baseStrokes = null;
+
+		function startScale(d){ scaling=true; scaleBaseDist=d; baseStrokes = JSON.parse(JSON.stringify(strokes)); }
+		function updateScale(d){ if(!scaling || scaleBaseDist===0) return; const factor = d/scaleBaseDist; strokes = baseStrokes.map(s=>({color:s.color,size:Math.max(1,s.size*factor),points:s.points.map(p=>({x: p.x*factor, y: p.y*factor}))})); drawAll(); }
+		function endScale(){ scaling=false; scaleBaseDist=null; baseStrokes=null; }
+
+		function disperse(){
+			const particles = [];
+			for(const s of strokes){
+				for(const p of s.points){
+					particles.push({x:p.x,y:p.y, vx:(Math.random()-0.5)*1.5, vy:Math.random()*1.2+0.5, alpha:1, color:s.color, size:Math.max(1,s.size/2)});
+				}
+			}
+			strokes = [];
+			let tstart = null;
+			function step(ts){
+				if(!tstart) tstart=ts;
+				const dt=(ts-tstart)/1000;
+				ctx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
+				for(const p of particles){
+					p.vy += 0.03; p.x += p.vx; p.y += p.vy; p.alpha -= 0.004;
+				}
+				for(const p of particles){
+					if(p.alpha<=0) continue;
+					ctx.globalAlpha = Math.max(0,p.alpha);
+					ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill();
+				}
+				ctx.globalAlpha = 1;
+				if(particles.some(p=>p.alpha>0)) requestAnimationFrame(step);
+				else ctx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
+			}
+			requestAnimationFrame(step);
+		}
+
+		const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+		hands.setOptions({maxNumHands:2,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
+		hands.onResults(onResults);
+
+		let cameraInstance = null;
+		async function startCamera(){
+			const constraints = {video:{width:{ideal:1280},height:{ideal:720},facingMode: "environment"},audio:false};
+			try{
+				const stream = await navigator.mediaDevices.getUserMedia(constraints);
+				video.srcObject = stream;
+				await video.play();
+				resizeCanvases(); window.addEventListener('resize',resizeCanvases);
+				loading.style.display='none';
+				cameraInstance = new Camera(video,{onFrame: async ()=>{await hands.send({image:video});}, width:1280,height:720});
+				cameraInstance.start();
+			}catch(e){loading.textContent='摄像头启动失败：'+e.message}
+		}
+		startCamera();
+
+		let panelVisible = false;
+		let panelAnchor = {x:100,y:100};
+
+		function showPanelAt(x,y){ uiPanel.style.left = (x+12)+'px'; uiPanel.style.top = (y+12)+'px'; uiPanel.style.display='block'; panelVisible=true; }
+		function hidePanel(){ uiPanel.style.display='none'; panelVisible=false; }
+
+		let lastPinch = false;
+
+		function onResults(results){
+			if(!video.videoWidth) return;
+			resizeCanvases();
+			tmp.clearRect(0,0,tmpCanvas.width,tmpCanvas.height);
+			const handsL = results.multiHandLandmarks || [];
+
+			let foundPalmOpen = false;
+			let primaryPalmPos = null;
+			for(const lm of handsL){ if(isPalmOpen(lm)){ foundPalmOpen = true; const p = pointOnCanvas(lm[0].x,lm[0].y); primaryPalmPos = p; break; } }
+
+			if(foundPalmOpen){ showPanelAt(primaryPalmPos.x,primaryPalmPos.y); }
+
+			if(panelVisible && handsL.length>0){
+				const lm = handsL[0];
+				const ip = pointOnCanvas(lm[8].x,lm[8].y);
+				handleUIPointer(ip.x,ip.y);
+				if(isPalmOpen(lm) && !foundPalmOpen){ hidePanel(); }
+			}
+
+			let anyPinch=false;
+			if(handsL.length>0){
+				const lm = handsL[0];
+				const pinch = isPinch(lm);
+				const idx = pointOnCanvas(lm[8].x,lm[8].y);
+				if(pinch && !lastPinch){ currentStroke = {points:[], color: tool==='pen'?penColor:'#000000', size: tool==='pen'?penSize:penSize*4}; strokes.push(currentStroke); }
+				if(pinch && currentStroke){ currentStroke.points.push({x:idx.x,y:idx.y}); drawAll(); tmp.clearRect(0,tmpCanvas.width,tmpCanvas.height); }
+				if(!pinch && lastPinch && currentStroke){ currentStroke=null; }
+				lastPinch = pinch;
+				anyPinch = pinch;
+			}
+
+			if(tool==='eraser' && anyPinch){
+				ctx.globalCompositeOperation = 'destination-out'; ctx.beginPath(); ctx.arc(tmpCanvas.width/2,tmpCanvas.height/2, penSize*3,0,Math.PI*2); ctx.fill(); ctx.globalCompositeOperation = 'source-over';
+			}
+
+			if(handsL.length===2){
+				const p1 = pointOnCanvas(handsL[0][8].x,handsL[0][8].y);
+				const p2 = pointOnCanvas(handsL[1][8].x,handsL[1][8].y);
+				const d = dist(p1,p2);
+				if(!scaling){ startScale(d);} else { updateScale(d); }
+			} else { if(scaling) endScale(); }
+
+			for(const lm of handsL){ if(indexMiddleOpen(lm)){ disperse(); break; } }
+
+			for(const lm of handsL){ const p = pointOnCanvas(lm[8].x,lm[8].y); tmp.fillStyle='rgba(255,255,255,0.9)'; tmp.beginPath(); tmp.arc(p.x,p.y,6,0,Math.PI*2); tmp.fill(); }
+
+		}
+	</script>
+</body>
+</html>
