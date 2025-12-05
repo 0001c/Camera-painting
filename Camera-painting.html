@@ -83,12 +83,18 @@
 
 		function isPalmOpen(landmarks){
 			if(!landmarks) return false;
-			const upIndex = isFingerUp(landmarks,8,6);
-			const upMiddle = isFingerUp(landmarks,12,10);
-			const upRing = isFingerUp(landmarks,16,14);
-			const upPinky = isFingerUp(landmarks,20,18);
-			const thumbAway = (landmarks[4].x - landmarks[2].x) * (landmarks[0].x - landmarks[2].x) < 0 || Math.abs(landmarks[4].x - landmarks[2].x) > 0.04;
-			return upIndex && upMiddle && upRing && upPinky && thumbAway;
+			// 更宽松的阈值，并使用手腕参考判断手指是否抬起
+			const wristY = landmarks[0].y;
+			const upIndex = landmarks[8].y < landmarks[6].y - 0.03 || landmarks[8].y < wristY - 0.02;
+			const upMiddle = landmarks[12].y < landmarks[10].y - 0.03 || landmarks[12].y < wristY - 0.02;
+			const upRing = landmarks[16].y < landmarks[14].y - 0.03 || landmarks[16].y < wristY - 0.02;
+			const upPinky = landmarks[20].y < landmarks[18].y - 0.03 || landmarks[20].y < wristY - 0.02;
+			// 拇指离开手掌（x方向或距离）
+			const thumbDist = Math.hypot(landmarks[4].x - landmarks[2].x, landmarks[4].y - landmarks[2].y);
+			const thumbAway = thumbDist > 0.04 || Math.abs(landmarks[4].x - landmarks[2].x) > 0.03;
+			// 如果至少三个手指抬起且拇指离开，则认为是张开手掌
+			const fingersUp = [upIndex, upMiddle, upRing, upPinky].filter(Boolean).length;
+			return fingersUp >= 3 && thumbAway;
 		}
 
 		function isPinch(landmarks){
